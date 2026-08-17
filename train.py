@@ -138,14 +138,17 @@ class GenericPairedValDataset(Dataset):
 
 class ValidationMetricsTracker:
     """Computes PSNR, SSIM, and LPIPS metrics and manages CSV & checkpoint logging."""
-    def __init__(self, device: torch.device, ckpt_dir: str, metrics_file: str):
+    def __init__(self, device: torch.device, ckpt_dir: str, metrics_file: str, max_epochs: int = 150):
         self.device = device
         self.ckpt_dir = Path(ckpt_dir)
         self.metrics_file = Path(metrics_file)
+        self.max_epochs = max_epochs
         self.ckpt_dir.mkdir(parents=True, exist_ok=True)
 
         self.best_psnr = -float('inf')
+        self.best_psnr_epoch = 0
         self.best_lpips = float('inf')
+        self.best_lpips_epoch = 0
 
         self.lpips_fn = None
         if HAS_LPIPS:
@@ -170,6 +173,8 @@ class ValidationMetricsTracker:
             clean_patch = clean_patch.to(self.device)
 
             restored = model(degrad_patch)
+            if restored.shape[-2:] != clean_patch.shape[-2:]:
+                restored = nn.functional.interpolate(restored, size=clean_patch.shape[-2:], mode='bilinear', align_corners=False)
             restored = torch.clamp(restored, 0.0, 1.0)
 
             rec_np = restored.cpu().numpy().transpose(0, 2, 3, 1)
@@ -198,28 +203,40 @@ class ValidationMetricsTracker:
         return avg_psnr, avg_ssim, avg_lpips
 
     def record_epoch(self, epoch: int, train_loss: float, val_psnr: float, val_ssim: float, val_lpips: float, model: nn.Module):
+        is_best_psnr = False
+
+        if val_psnr > self.best_psnr:
+            self.best_psnr = val_psnr
+            self.best_psnr_epoch = epoch
+            is_best_psnr = True
+            best_psnr_path = self.ckpt_dir / "best_psnr_model.pth"
+            torch.save({'epoch': epoch, 'state_dict': model.state_dict(), 'psnr': val_psnr, 'ssim': val_ssim}, best_psnr_path)
+            print(f"\n>>> [NEW BEST] New Best PSNR: {val_psnr:.2f} dB achieved! Saved best_psnr_model.pth")
+
+        if val_lpips > 0 and val_lpips < self.best_lpips:
+            self.best_lpips = val_lpips
+            self.best_lpips_epoch = epoch
+            best_lpips_path = self.ckpt_dir / "best_lpips_model.pth"
+            torch.save({'epoch': epoch, 'state_dict': model.state_dict(), 'lpips': val_lpips, 'psnr': val_psnr}, best_lpips_path)
+            print(f"\n>>> [NEW BEST] New Best LPIPS: {val_lpips:.4f} achieved! Saved best_lpips_model.pth")
+
+        best_psnr_str = f"{self.best_psnr:.2f} dB (Epoch {self.best_psnr_epoch})" if self.best_psnr != -float('inf') else "N/A"
+        print(
+            f"Epoch [{epoch}/{self.max_epochs}] | "
+            f"Val PSNR: {val_psnr:.2f} dB | "
+            f"Val SSIM: {val_ssim:.4f} | "
+            f"Val LPIPS: {val_lpips:.4f} | "
+            f"Best PSNR So Far: {best_psnr_str}"
+        )
+
         file_exists = self.metrics_file.exists()
         self.metrics_file.parent.mkdir(parents=True, exist_ok=True)
         with open(self.metrics_file, mode='a', newline='', encoding='utf-8') as f:
             writer = csv.writer(f)
             if not file_exists:
-                writer.writerow(['epoch', 'train_loss', 'val_psnr', 'val_ssim', 'val_lpips'])
-            writer.writerow([epoch, f"{train_loss:.6f}", f"{val_psnr:.4f}", f"{val_ssim:.4f}", f"{val_lpips:.4f}"])
+                writer.writerow(['epoch', 'train_loss', 'val_psnr', 'val_ssim', 'val_lpips', 'is_best_psnr'])
+            writer.writerow([epoch, f"{train_loss:.6f}", f"{val_psnr:.4f}", f"{val_ssim:.4f}", f"{val_lpips:.4f}", is_best_psnr])
             f.flush()
-
-        print(f"\n[Epoch {epoch:03d}] Train Loss: {train_loss:.6f} | PSNR: {val_psnr:.2f} dB | SSIM: {val_ssim:.4f} | LPIPS: {val_lpips:.4f}")
-
-        if val_psnr > self.best_psnr:
-            self.best_psnr = val_psnr
-            best_psnr_path = self.ckpt_dir / "best_psnr_model.pth"
-            torch.save({'epoch': epoch, 'state_dict': model.state_dict(), 'psnr': val_psnr, 'ssim': val_ssim}, best_psnr_path)
-            print(f" [CHECKPOINT] Saved new best PSNR model ({val_psnr:.2f} dB) -> {best_psnr_path.name}")
-
-        if val_lpips > 0 and val_lpips < self.best_lpips:
-            self.best_lpips = val_lpips
-            best_lpips_path = self.ckpt_dir / "best_lpips_model.pth"
-            torch.save({'epoch': epoch, 'state_dict': model.state_dict(), 'lpips': val_lpips, 'psnr': val_psnr}, best_lpips_path)
-            print(f" [CHECKPOINT] Saved new best LPIPS model ({val_lpips:.4f}) -> {best_lpips_path.name}")
 
 
 class AdaIRValidationCallback(Callback):
@@ -258,6 +275,8 @@ class AdaIRModel(pl.LightningModule):
     def training_step(self, batch, batch_idx):
         ([clean_name, de_id], degrad_patch, clean_patch) = batch
         restored = self.net(degrad_patch)
+        if restored.shape[-2:] != clean_patch.shape[-2:]:
+            restored = nn.functional.interpolate(restored, size=clean_patch.shape[-2:], mode='bilinear', align_corners=False)
         loss = self.loss_fn(restored, clean_patch)
         self.log("train_loss", loss)
         return loss
@@ -270,7 +289,7 @@ class AdaIRModel(pl.LightningModule):
 
 def main():
     print("=" * 70)
-    print("🚀 Starting AdaIR Training & Validation Loop")
+    print("[START] Starting AdaIR Training & Validation Loop")
     print(f"  Input Folder: {opt.input_dir} | Target Folder: {opt.target_dir}")
     print(f"  Scale Factor: {opt.scale}x (Target = Input * {opt.scale})")
     print(f"  Epochs: {opt.epochs} | Batch Size: {opt.batch_size} | LR: {opt.lr}")
@@ -297,7 +316,8 @@ def main():
     tracker = ValidationMetricsTracker(
         device=torch.device('cuda:0' if device_str == 'gpu' else 'cpu'),
         ckpt_dir=opt.ckpt_dir,
-        metrics_file=opt.metrics_file
+        metrics_file=opt.metrics_file,
+        max_epochs=opt.epochs
     )
     val_callback = AdaIRValidationCallback(val_loader, tracker)
 

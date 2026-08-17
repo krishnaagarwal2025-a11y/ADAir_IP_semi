@@ -8,10 +8,10 @@ alwaysApply: true
 
 ## Core Files You Should Know
 - `net/model.py` (51 nodes)
-- `utils/dataset_utils.py` (42 nodes)
 - `utils/image_utils.py` (20 nodes)
 - `options.py` (2 nodes)
 - `utils/degradation_utils.py` (7 nodes)
+- `utils/image_io.py` (30 nodes)
 
 ## Top Functions & Classes
 - `pil_to_np` in `utils/image_io.py`
@@ -23,14 +23,14 @@ alwaysApply: true
 - `_degrade_by_type` in `utils/degradation_utils.py`
 - `_init_clean_ids` in `utils/dataset_utils.py`
 - `_ssim` in `utils/pytorch_ssim/__init__.py`
-- `log_info` in `validate_dataset.py`
+- `enforce_unit_range` in `utils/dataset_utils.py`
 
 ## Main Entry Points
 - `train.py`
 - `test.py`
+- `utils/dataset_utils.py`
 - `validate_dataset.py`
 - `utils/pytorch_ssim/__init__.py`
-- `utils/imresize.py`
 
 ## Instructions
 - When modifying these core dependencies, heavily trace caller graphs before refactoring.

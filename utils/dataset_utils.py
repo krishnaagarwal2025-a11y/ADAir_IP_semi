@@ -66,16 +66,24 @@ def load_image_or_npy(path) -> np.ndarray:
         arr = np.array(Image.open(path_str).convert('RGB'), dtype=np.float32)
 
     # Dynamic normalization: enforce strict float32 [0.0, 1.0]
-    if arr.max() > 1.0:
-        arr = arr / 255.0
+    arr = enforce_unit_range(arr)
     arr = np.clip(arr, 0.0, 1.0)
     return arr
 
 
+def enforce_unit_range(arr: np.ndarray) -> np.ndarray:
+    """Convert an array to float32 in [0.0, 1.0]. Divide by 255 only when max > 1.0."""
+    arr = np.asarray(arr, dtype=np.float32)
+    if arr.max() > 1.0:
+        arr = arr / 255.0
+    return arr
+
+
 class AdaIRTrainDataset(Dataset):
-    def __init__(self, args):
+    def __init__(self, args, augment=True):
         super(AdaIRTrainDataset, self).__init__()
         self.args = args
+        self.augment = augment
         self.scale = getattr(args, 'scale', 2)
         self.patch_size = getattr(args, 'patch_size', 128)
         self.sample_ids = []
@@ -331,30 +339,39 @@ class AdaIRTrainDataset(Dataset):
     def __getitem__(self, idx):
         sample = self.sample_ids[idx]
         if sample.get('is_custom'):
-            degrad_img = load_image_or_npy(sample['degrad_path'])  # float32 [0, 1]
-            clean_img = load_image_or_npy(sample['clean_path'])    # float32 [0, 1]
+            degrad_img = load_image_or_npy(sample['degrad_path'])
+            clean_img = load_image_or_npy(sample['clean_path'])
 
-            # Paired patch extraction (LR: patch_size, GT: patch_size * scale)
-            degrad_patch, clean_patch = self._crop_patch(degrad_img, clean_img)
-            degrad_patch = degrad_patch.copy()
-            clean_patch = clean_patch.copy()
+            # Absolute normalization: both input and target must be float32 [0.0, 1.0]
+            degrad_img = degrad_img.astype(np.float32, copy=False)
+            clean_img = clean_img.astype(np.float32, copy=False)
+            if clean_img.max() > 1.0:
+                clean_img = clean_img / 255.0
+            if degrad_img.max() > 1.0:
+                degrad_img = degrad_img / 255.0
 
-            # Low-variance filter: reject flat target patches (var < 1e-4), retry
-            max_retries = 5
-            retry = 0
-            while clean_patch.var() < 1e-4 and retry < max_retries:
+            if self.augment:
+                # Training: random crop, flips, and CutBlur
                 degrad_patch, clean_patch = self._crop_patch(degrad_img, clean_img)
                 degrad_patch = degrad_patch.copy()
                 clean_patch = clean_patch.copy()
-                retry += 1
 
-            # 8-fold paired augmentation (identical transforms to both)
-            degrad_patch, clean_patch = self._augment_pair(degrad_patch, clean_patch)
+                # Low-variance filter: reject flat target patches (var < 1e-4), retry
+                max_retries = 5
+                retry = 0
+                while clean_patch.var() < 1e-4 and retry < max_retries:
+                    degrad_patch, clean_patch = self._crop_patch(degrad_img, clean_img)
+                    degrad_patch = degrad_patch.copy()
+                    clean_patch = clean_patch.copy()
+                    retry += 1
 
-            # Apply CutBlur augmentation (20% probability)
-            degrad_patch, clean_patch = self._apply_cutblur(degrad_patch, clean_patch, scale=self.scale, prob=0.2)
+                degrad_patch, clean_patch = self._augment_pair(degrad_patch, clean_patch)
+                degrad_patch, clean_patch = self._apply_cutblur(degrad_patch, clean_patch, scale=self.scale, prob=0.2)
+            else:
+                # Validation: un-augmented, full/aligned pairs (no CutBlur, crop, or flips)
+                degrad_patch = np.ascontiguousarray(degrad_img)
+                clean_patch = np.ascontiguousarray(clean_img)
 
-            # Convert to tensors (already float32 [0, 1])
             clean_patch = torch.from_numpy(clean_patch.copy()).permute(2, 0, 1).float()
             degrad_patch = torch.from_numpy(degrad_patch.copy()).permute(2, 0, 1).float()
 
@@ -364,11 +381,17 @@ class AdaIRTrainDataset(Dataset):
             if de_id < 3:
                 clean_id = sample["clean_id"]
                 clean_img = crop_img(load_image_or_npy(clean_id), base=16)
-                clean_patch = self.crop_transform(clean_img)
-                clean_patch = np.array(clean_patch)
-                clean_name = clean_id.split("/")[-1].split('.')[0]
-                clean_patch = random_augmentation(clean_patch)[0]
-                degrad_patch = self.D.single_degrade(clean_patch, de_id)
+                clean_img = enforce_unit_range(clean_img)
+                if self.augment:
+                    clean_patch = self.crop_transform(clean_img)
+                    clean_patch = np.array(clean_patch)
+                    clean_name = clean_id.split("/")[-1].split('.')[0]
+                    clean_patch = random_augmentation(clean_patch)[0]
+                    degrad_patch = self.D.single_degrade(clean_patch, de_id)
+                else:
+                    clean_name = clean_id.split("/")[-1].split('.')[0]
+                    clean_patch = np.ascontiguousarray(clean_img)
+                    degrad_patch = self.D.single_degrade(clean_patch, de_id)
             else:
                 if de_id == 3:
                     degrad_img = crop_img(load_image_or_npy(sample["clean_id"]), base=16)
@@ -387,10 +410,25 @@ class AdaIRTrainDataset(Dataset):
                     clean_img = crop_img(load_image_or_npy(os.path.join(self.args.enhance_dir, 'gt/', sample["clean_id"])), base=16)
                     clean_name = self._get_enhance_name(sample["clean_id"])
 
-                degrad_patch, clean_patch = random_augmentation(*self._crop_patch(degrad_img, clean_img))
+                degrad_img = enforce_unit_range(degrad_img)
+                clean_img = enforce_unit_range(clean_img)
+                if self.augment:
+                    degrad_patch, clean_patch = random_augmentation(*self._crop_patch(degrad_img, clean_img))
+                else:
+                    degrad_patch = np.ascontiguousarray(degrad_img)
+                    clean_patch = np.ascontiguousarray(clean_img)
 
-            clean_patch = self.toTensor(clean_patch)
-            degrad_patch = self.toTensor(degrad_patch)
+            if self.augment:
+                clean_patch = self.toTensor(clean_patch)
+                degrad_patch = self.toTensor(degrad_patch)
+            else:
+                if not torch.is_tensor(clean_patch):
+                    clean_patch = torch.from_numpy(np.ascontiguousarray(clean_patch)).permute(2, 0, 1).float()
+                    degrad_patch = torch.from_numpy(np.ascontiguousarray(degrad_patch)).permute(2, 0, 1).float()
+                    if clean_patch.max() > 1.0:
+                        clean_patch = clean_patch / 255.0
+                    if degrad_patch.max() > 1.0:
+                        degrad_patch = degrad_patch / 255.0
 
             return [clean_name, de_id], degrad_patch, clean_patch
 
@@ -493,7 +531,15 @@ class DerainDehazeDataset(Dataset):
             degraded_img, _ = self._add_gaussian_noise(degraded_img)
         clean_img = crop_img(load_image_or_npy(clean_path), base=16)
 
-        clean_img, degraded_img = self.toTensor(clean_img), self.toTensor(degraded_img)
+        degraded_img = np.asarray(degraded_img, dtype=np.float32)
+        clean_img = np.asarray(clean_img, dtype=np.float32)
+        if clean_img.max() > 1.0:
+            clean_img = clean_img / 255.0
+        if degraded_img.max() > 1.0:
+            degraded_img = degraded_img / 255.0
+
+        clean_img = torch.from_numpy(np.ascontiguousarray(clean_img)).permute(2, 0, 1).float()
+        degraded_img = torch.from_numpy(np.ascontiguousarray(degraded_img)).permute(2, 0, 1).float()
         degraded_name = Path(degraded_path).stem
 
         return [degraded_name], degraded_img, clean_img

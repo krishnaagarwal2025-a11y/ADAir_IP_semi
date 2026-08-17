@@ -7,11 +7,10 @@ import torch.optim as optim
 from torch.utils.data import DataLoader, Dataset
 import numpy as np
 from pathlib import Path
-from PIL import Image
 from tqdm import tqdm
 from skimage.metrics import peak_signal_noise_ratio, structural_similarity
 
-from utils.dataset_utils import AdaIRTrainDataset, crop_img
+from utils.dataset_utils import AdaIRTrainDataset, crop_img, load_image_or_npy, is_valid_image_file
 from net.model import AdaIR
 from utils.schedulers import LinearWarmupCosineAnnealingLR
 from options import options as opt
@@ -32,53 +31,23 @@ try:
 except ImportError:
     HAS_LPIPS = False
 
+tm_psnr = None
+tm_ssim = None
 try:
     import torchmetrics
+    try:
+        from torchmetrics.functional.image import (
+            peak_signal_noise_ratio as tm_psnr,
+            structural_similarity_index_measure as tm_ssim,
+        )
+    except ImportError:
+        from torchmetrics.functional import (
+            peak_signal_noise_ratio as tm_psnr,
+            structural_similarity_index_measure as tm_ssim,
+        )
     HAS_TORCHMETRICS = True
 except ImportError:
     HAS_TORCHMETRICS = False
-
-
-IGNORED_SYSTEM_FILES = {'.ds_store', 'thumbs.db', 'desktop.ini', '.gitignore'}
-
-VALID_EXTENSIONS = ('.png', '.jpg', '.jpeg', '.bmp', '.tif', '.tiff', '.webp', '.npy')
-
-def is_valid_image_file(path: Path) -> bool:
-    """Returns True if file is a non-hidden, valid image/npy file, filtering OS metadata."""
-    name_lower = path.name.lower()
-    if name_lower.startswith('.') or name_lower.startswith('._'):
-        return False
-    if name_lower in IGNORED_SYSTEM_FILES:
-        return False
-    return path.is_file() and path.suffix.lower() in VALID_EXTENSIONS
-
-
-def load_image_or_npy(path) -> np.ndarray:
-    """Loads an image file or a NumPy array (.npy) file into a (H, W, 3) uint8 RGB array."""
-    path_str = str(path)
-    if path_str.lower().endswith('.npy'):
-        arr = np.load(path_str)
-        if np.isnan(arr).any() or np.isinf(arr).any():
-            arr = np.nan_to_num(arr)
-        if arr.ndim == 2:
-            arr = np.stack([arr] * 3, axis=-1)
-        elif arr.ndim == 3:
-            if arr.shape[0] in (1, 3, 4) and arr.shape[2] > 4:
-                arr = arr.transpose(1, 2, 0)
-            if arr.shape[2] == 1:
-                arr = np.concatenate([arr] * 3, axis=-1)
-            elif arr.shape[2] > 3:
-                arr = arr[:, :, :3]
-        if np.issubdtype(arr.dtype, np.floating):
-            if arr.max() <= 1.0 and arr.min() >= 0.0:
-                arr = (arr * 255.0).astype(np.uint8)
-            else:
-                arr = np.clip(arr, 0, 255).astype(np.uint8)
-        elif arr.dtype != np.uint8:
-            arr = arr.astype(np.uint8)
-        return arr
-    else:
-        return np.array(Image.open(path_str).convert('RGB'))
 
 
 class GenericPairedValDataset(Dataset):
@@ -127,11 +96,20 @@ class GenericPairedValDataset(Dataset):
         in_img = load_image_or_npy(in_path)
         tg_img = load_image_or_npy(tg_path)
 
+        # Absolute normalization: both input and target must be float32 [0.0, 1.0]
+        in_img = np.asarray(in_img, dtype=np.float32)
+        tg_img = np.asarray(tg_img, dtype=np.float32)
+        if tg_img.max() > 1.0:
+            tg_img = tg_img / 255.0
+        if in_img.max() > 1.0:
+            in_img = in_img / 255.0
+
+        # Deterministic alignment crop only (no random crop, flips, or CutBlur)
         in_img = crop_img(in_img, base=16)
         tg_img = crop_img(tg_img, base=16)
 
-        in_tensor = torch.from_numpy(in_img).permute(2, 0, 1).float() / 255.0
-        tg_tensor = torch.from_numpy(tg_img).permute(2, 0, 1).float() / 255.0
+        in_tensor = torch.from_numpy(np.ascontiguousarray(in_img)).permute(2, 0, 1).float()
+        tg_tensor = torch.from_numpy(np.ascontiguousarray(tg_img)).permute(2, 0, 1).float()
 
         return [in_path.stem], in_tensor, tg_tensor
 
@@ -179,19 +157,27 @@ class ValidationMetricsTracker:
             restored = model(degrad_patch)
             if restored.shape[-2:] != clean_patch.shape[-2:]:
                 restored = nn.functional.interpolate(restored, size=clean_patch.shape[-2:], mode='bilinear', align_corners=False)
-            restored = torch.clamp(restored, 0.0, 1.0)
 
-            rec_np = restored.cpu().numpy().transpose(0, 2, 3, 1)
-            cln_np = clean_patch.cpu().numpy().transpose(0, 2, 3, 1)
+            preds = torch.clamp(restored, 0.0, 1.0)
+            targets = torch.clamp(clean_patch, 0.0, 1.0)
+
+            rec_np = preds.detach().cpu().numpy().transpose(0, 2, 3, 1)
+            cln_np = targets.detach().cpu().numpy().transpose(0, 2, 3, 1)
 
             for i in range(rec_np.shape[0]):
                 if max_samples > 0 and n_evaluated >= max_samples:
                     break
-                p_val = peak_signal_noise_ratio(cln_np[i], rec_np[i], data_range=1.0)
-                try:
-                    s_val = structural_similarity(cln_np[i], rec_np[i], data_range=1.0, channel_axis=-1)
-                except TypeError:
-                    s_val = structural_similarity(cln_np[i], rec_np[i], data_range=1.0, multichannel=True)
+                if HAS_TORCHMETRICS and tm_psnr is not None:
+                    pred_i = preds[i:i + 1]
+                    target_i = targets[i:i + 1]
+                    p_val = tm_psnr(pred_i, target_i, data_range=1.0).item()
+                    s_val = tm_ssim(pred_i, target_i, data_range=1.0).item()
+                else:
+                    p_val = peak_signal_noise_ratio(cln_np[i], rec_np[i], data_range=1.0)
+                    try:
+                        s_val = structural_similarity(cln_np[i], rec_np[i], data_range=1.0, channel_axis=-1)
+                    except TypeError:
+                        s_val = structural_similarity(cln_np[i], rec_np[i], data_range=1.0, multichannel=True)
 
                 psnr_list.append(p_val)
                 ssim_list.append(s_val)
@@ -201,8 +187,8 @@ class ValidationMetricsTracker:
                 # Only compute LPIPS for images we actually evaluated in this batch
                 n_batch = rec_np.shape[0]
                 used = min(n_batch, max(0, max_samples - (n_evaluated - n_batch))) if max_samples > 0 else n_batch
-                rec_norm = restored[:used] * 2.0 - 1.0
-                cln_norm = clean_patch[:used] * 2.0 - 1.0
+                rec_norm = preds[:used] * 2.0 - 1.0
+                cln_norm = targets[:used] * 2.0 - 1.0
                 lp_val = self.lpips_fn(rec_norm, cln_norm).mean().item()
                 lpips_list.append(lp_val)
 
@@ -397,13 +383,14 @@ def main():
         val_dataset.pairs = val_dataset.pairs[:opt.max_samples]
         print(f"[Val] Subsampled validation set to {opt.max_samples} pairs (--max_samples={opt.max_samples})")
     if len(val_dataset) == 0:
-        print(f"[Notice] No validation images found in '{opt.val_dir}'. Using subset of training data for validation metrics.")
-        val_loader = trainloader
-    else:
-        val_loader = DataLoader(
-            val_dataset, batch_size=opt.val_batch_size, shuffle=True,
-            num_workers=opt.num_workers, pin_memory=True, persistent_workers=use_persistent
-        )
+        print(f"[Notice] No validation images found in '{opt.val_dir}'. Using unaugmented training pairs for validation metrics.")
+        val_dataset = AdaIRTrainDataset(opt, augment=False)
+        if opt.max_samples and opt.max_samples > 0 and len(val_dataset) > opt.max_samples:
+            val_dataset.sample_ids = val_dataset.sample_ids[:opt.max_samples]
+    val_loader = DataLoader(
+        val_dataset, batch_size=1, shuffle=False,
+        num_workers=opt.num_workers, pin_memory=True, persistent_workers=use_persistent
+    )
 
     tracker = ValidationMetricsTracker(
         device=torch.device('cuda:0' if device_str == 'gpu' else 'cpu'),

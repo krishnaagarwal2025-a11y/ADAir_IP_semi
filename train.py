@@ -41,18 +41,48 @@ except ImportError:
 
 IGNORED_SYSTEM_FILES = {'.ds_store', 'thumbs.db', 'desktop.ini', '.gitignore'}
 
+VALID_EXTENSIONS = ('.png', '.jpg', '.jpeg', '.bmp', '.tif', '.tiff', '.webp', '.npy')
+
 def is_valid_image_file(path: Path) -> bool:
-    """Returns True if file is a non-hidden, valid image file, filtering OS metadata."""
+    """Returns True if file is a non-hidden, valid image/npy file, filtering OS metadata."""
     name_lower = path.name.lower()
     if name_lower.startswith('.') or name_lower.startswith('._'):
         return False
     if name_lower in IGNORED_SYSTEM_FILES:
         return False
-    return path.is_file() and path.suffix.lower() in ('.png', '.jpg', '.jpeg', '.bmp', '.tif', '.tiff', '.webp')
+    return path.is_file() and path.suffix.lower() in VALID_EXTENSIONS
+
+
+def load_image_or_npy(path) -> np.ndarray:
+    """Loads an image file or a NumPy array (.npy) file into a (H, W, 3) uint8 RGB array."""
+    path_str = str(path)
+    if path_str.lower().endswith('.npy'):
+        arr = np.load(path_str)
+        if np.isnan(arr).any() or np.isinf(arr).any():
+            arr = np.nan_to_num(arr)
+        if arr.ndim == 2:
+            arr = np.stack([arr] * 3, axis=-1)
+        elif arr.ndim == 3:
+            if arr.shape[0] in (1, 3, 4) and arr.shape[2] > 4:
+                arr = arr.transpose(1, 2, 0)
+            if arr.shape[2] == 1:
+                arr = np.concatenate([arr] * 3, axis=-1)
+            elif arr.shape[2] > 3:
+                arr = arr[:, :, :3]
+        if np.issubdtype(arr.dtype, np.floating):
+            if arr.max() <= 1.0 and arr.min() >= 0.0:
+                arr = (arr * 255.0).astype(np.uint8)
+            else:
+                arr = np.clip(arr, 0, 255).astype(np.uint8)
+        elif arr.dtype != np.uint8:
+            arr = arr.astype(np.uint8)
+        return arr
+    else:
+        return np.array(Image.open(path_str).convert('RGB'))
 
 
 class GenericPairedValDataset(Dataset):
-    """Dataset loader for validation input/target paired images (supporting NoisyLR/GT)."""
+    """Dataset loader for validation input/target paired images (supporting NoisyLR/GT and .npy files)."""
     def __init__(self, val_dir: str, input_dir_name: str = 'NoisyLR', target_dir_name: str = 'GT'):
         super().__init__()
         self.val_dir = Path(val_dir)
@@ -94,8 +124,8 @@ class GenericPairedValDataset(Dataset):
 
     def __getitem__(self, idx):
         in_path, tg_path = self.pairs[idx]
-        in_img = np.array(Image.open(in_path).convert('RGB'))
-        tg_img = np.array(Image.open(tg_path).convert('RGB'))
+        in_img = load_image_or_npy(in_path)
+        tg_img = load_image_or_npy(tg_path)
 
         in_img = crop_img(in_img, base=16)
         tg_img = crop_img(tg_img, base=16)

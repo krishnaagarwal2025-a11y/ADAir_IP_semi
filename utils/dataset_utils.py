@@ -13,6 +13,7 @@ from utils.degradation_utils import Degradation
 
     
 IGNORED_SYSTEM_FILES = {'.ds_store', 'thumbs.db', 'desktop.ini', '.gitignore'}
+VALID_EXTENSIONS = ('.png', '.jpg', '.jpeg', '.bmp', '.tif', '.tiff', '.webp', '.npy')
 
 def filter_system_files(file_list):
     """Filters out OS metadata files like .DS_Store, Thumbs.db, desktop.ini, and hidden files."""
@@ -23,8 +24,41 @@ def filter_system_files(file_list):
             continue
         if basename in IGNORED_SYSTEM_FILES:
             continue
-        valid.append(f)
+        ext = os.path.splitext(basename)[1]
+        if ext in VALID_EXTENSIONS:
+            valid.append(f)
     return valid
+
+
+def load_image_or_npy(path) -> np.ndarray:
+    """
+    Loads an image file (.png, .jpg, etc.) or a NumPy array (.npy) file
+    and returns a 3-channel RGB numpy array (H, W, 3) in uint8 format.
+    """
+    path_str = str(path)
+    if path_str.lower().endswith('.npy'):
+        arr = np.load(path_str)
+        if np.isnan(arr).any() or np.isinf(arr).any():
+            arr = np.nan_to_num(arr)
+        if arr.ndim == 2:
+            arr = np.stack([arr] * 3, axis=-1)
+        elif arr.ndim == 3:
+            if arr.shape[0] in (1, 3, 4) and arr.shape[2] > 4:
+                arr = arr.transpose(1, 2, 0)
+            if arr.shape[2] == 1:
+                arr = np.concatenate([arr] * 3, axis=-1)
+            elif arr.shape[2] > 3:
+                arr = arr[:, :, :3]
+        if np.issubdtype(arr.dtype, np.floating):
+            if arr.max() <= 1.0 and arr.min() >= 0.0:
+                arr = (arr * 255.0).astype(np.uint8)
+            else:
+                arr = np.clip(arr, 0, 255).astype(np.uint8)
+        elif arr.dtype != np.uint8:
+            arr = arr.astype(np.uint8)
+        return arr
+    else:
+        return np.array(Image.open(path_str).convert('RGB'))
 
 
 class AdaIRTrainDataset(Dataset):
@@ -213,7 +247,7 @@ class AdaIRTrainDataset(Dataset):
             elif de_id == 2:
                 clean_id = sample["clean_id"]
 
-            clean_img = crop_img(np.array(Image.open(clean_id).convert('RGB')), base=16)
+            clean_img = crop_img(load_image_or_npy(clean_id), base=16)
             clean_patch = self.crop_transform(clean_img)
             clean_patch= np.array(clean_patch)
 
@@ -225,23 +259,23 @@ class AdaIRTrainDataset(Dataset):
         else:
             if de_id == 3:
                 # Rain Streak Removal
-                degrad_img = crop_img(np.array(Image.open(sample["clean_id"]).convert('RGB')), base=16)
+                degrad_img = crop_img(load_image_or_npy(sample["clean_id"]), base=16)
                 clean_name = self._get_gt_name(sample["clean_id"])
-                clean_img = crop_img(np.array(Image.open(clean_name).convert('RGB')), base=16)
+                clean_img = crop_img(load_image_or_npy(clean_name), base=16)
             elif de_id == 4:
                 # Dehazing with SOTS outdoor training set
-                degrad_img = crop_img(np.array(Image.open(sample["clean_id"]).convert('RGB')), base=16)
+                degrad_img = crop_img(load_image_or_npy(sample["clean_id"]), base=16)
                 clean_name = self._get_nonhazy_name(sample["clean_id"])
-                clean_img = crop_img(np.array(Image.open(clean_name).convert('RGB')), base=16)
+                clean_img = crop_img(load_image_or_npy(clean_name), base=16)
             elif de_id == 5:
                 # Deblur with Gopro set
-                degrad_img = crop_img(np.array(Image.open(os.path.join(self.args.gopro_dir, 'blur/', sample["clean_id"])).convert('RGB')), base=16)
-                clean_img = crop_img(np.array(Image.open(os.path.join(self.args.gopro_dir, 'sharp/', sample["clean_id"])).convert('RGB')), base=16)
+                degrad_img = crop_img(load_image_or_npy(os.path.join(self.args.gopro_dir, 'blur/', sample["clean_id"])), base=16)
+                clean_img = crop_img(load_image_or_npy(os.path.join(self.args.gopro_dir, 'sharp/', sample["clean_id"])), base=16)
                 clean_name = self._get_deblur_name(sample["clean_id"])
             elif de_id == 6:
                 # Enhancement with LOL training set
-                degrad_img = crop_img(np.array(Image.open(os.path.join(self.args.enhance_dir, 'low/', sample["clean_id"])).convert('RGB')), base=16)
-                clean_img = crop_img(np.array(Image.open(os.path.join(self.args.enhance_dir, 'gt/', sample["clean_id"])).convert('RGB')), base=16)
+                degrad_img = crop_img(load_image_or_npy(os.path.join(self.args.enhance_dir, 'low/', sample["clean_id"])), base=16)
+                clean_img = crop_img(load_image_or_npy(os.path.join(self.args.enhance_dir, 'gt/', sample["clean_id"])), base=16)
                 clean_name = self._get_enhance_name(sample["clean_id"])
 
             degrad_patch, clean_patch = random_augmentation(*self._crop_patch(degrad_img, clean_img))
@@ -268,7 +302,7 @@ class DenoiseTestDataset(Dataset):
         self.toTensor = ToTensor()
 
     def _init_clean_ids(self):
-        name_list = os.listdir(self.args.denoise_path)
+        name_list = filter_system_files(os.listdir(self.args.denoise_path))
         self.clean_ids += [self.args.denoise_path + id_ for id_ in name_list]
 
         self.num_clean = len(self.clean_ids)
@@ -282,36 +316,14 @@ class DenoiseTestDataset(Dataset):
         self.sigma = sigma
 
     def __getitem__(self, clean_id):
-        clean_img = crop_img(np.array(Image.open(self.clean_ids[clean_id]).convert('RGB')), base=16)
+        clean_img = crop_img(load_image_or_npy(self.clean_ids[clean_id]), base=16)
         clean_name = self.clean_ids[clean_id].split("/")[-1].split('.')[0]
 
         noisy_img, _ = self._add_gaussian_noise(clean_img)
         clean_img, noisy_img = self.toTensor(clean_img), self.toTensor(noisy_img)
 
         return [clean_name], noisy_img, clean_img
-    def tile_degrad(input_,tile=128,tile_overlap =0):
-        sigma_dict = {0:0,1:15,2:25,3:50}
-        b, c, h, w = input_.shape
-        tile = min(tile, h, w)
-        assert tile % 8 == 0, "tile size should be multiple of 8"
 
-        stride = tile - tile_overlap
-        h_idx_list = list(range(0, h-tile, stride)) + [h-tile]
-        w_idx_list = list(range(0, w-tile, stride)) + [w-tile]
-        E = torch.zeros(b, c, h, w).type_as(input_)
-        W = torch.zeros_like(E)
-        s = 0
-        for h_idx in h_idx_list:
-            for w_idx in w_idx_list:
-                in_patch = input_[..., h_idx:h_idx+tile, w_idx:w_idx+tile]
-                out_patch = in_patch
-                out_patch_mask = torch.ones_like(in_patch)
-
-                E[..., h_idx:(h_idx+tile), w_idx:(w_idx+tile)].add_(out_patch)
-                W[..., h_idx:(h_idx+tile), w_idx:(w_idx+tile)].add_(out_patch_mask)
-
-        restored = torch.clamp(restored, 0, 1)
-        return restored
     def __len__(self):
         return self.num_clean
 
@@ -329,44 +341,54 @@ class DerainDehazeDataset(Dataset):
         self.sigma = sigma
 
         self.set_dataset(task)
+
     def _add_gaussian_noise(self, clean_patch):
         noise = np.random.randn(*clean_patch.shape)
         noisy_patch = np.clip(clean_patch + noise * self.sigma, 0, 255).astype(np.uint8)
         return noisy_patch, clean_patch
 
     def _init_input_ids(self):
+        sub_input = getattr(self.args, 'input_dir', 'input')
         if self.task_idx == 0:
             self.ids = []
-            name_list = os.listdir(self.args.derain_path + 'input/')
-            self.ids += [self.args.derain_path + 'input/' + id_ for id_ in name_list]
+            target_dir = os.path.join(self.args.derain_path, sub_input)
+            if not os.path.exists(target_dir): target_dir = os.path.join(self.args.derain_path, 'input')
+            name_list = filter_system_files(os.listdir(target_dir))
+            self.ids += [os.path.join(target_dir, id_) for id_ in name_list]
         elif self.task_idx == 1:
             self.ids = []
-            name_list = os.listdir(self.args.dehaze_path + 'input/')
-            self.ids += [self.args.dehaze_path + 'input/' + id_ for id_ in name_list]
+            target_dir = os.path.join(self.args.dehaze_path, sub_input)
+            if not os.path.exists(target_dir): target_dir = os.path.join(self.args.dehaze_path, 'input')
+            name_list = filter_system_files(os.listdir(target_dir))
+            self.ids += [os.path.join(target_dir, id_) for id_ in name_list]
         elif self.task_idx == 2:
             self.ids = []
-            name_list = os.listdir(self.args.gopro_path +'input/')
-            self.ids += [self.args.gopro_path + 'input/' + id_ for id_ in name_list]
+            target_dir = os.path.join(self.args.gopro_path, sub_input)
+            if not os.path.exists(target_dir): target_dir = os.path.join(self.args.gopro_path, 'input')
+            name_list = filter_system_files(os.listdir(target_dir))
+            self.ids += [os.path.join(target_dir, id_) for id_ in name_list]
         elif self.task_idx == 3:
             self.ids = []
-            name_list = os.listdir(self.args.enhance_path + 'input/')
-            self.ids += [self.args.enhance_path + 'input/' + id_ for id_ in name_list]
-
+            target_dir = os.path.join(self.args.enhance_path, sub_input)
+            if not os.path.exists(target_dir): target_dir = os.path.join(self.args.enhance_path, 'input')
+            name_list = filter_system_files(os.listdir(target_dir))
+            self.ids += [os.path.join(target_dir, id_) for id_ in name_list]
 
         self.length = len(self.ids)
 
     def _get_gt_path(self, degraded_name):
+        sub_gt = getattr(self.args, 'target_dir', 'target')
+        sub_in = getattr(self.args, 'input_dir', 'input')
         if self.task_idx == 0:
-            gt_name = degraded_name.replace("input", "target")
+            gt_name = degraded_name.replace(sub_in, sub_gt).replace("input", "target")
         elif self.task_idx == 1:
-            dir_name = degraded_name.split("input")[0] + 'target/'
+            dir_name = degraded_name.split(sub_in)[0] + f'{sub_gt}/'
             name = degraded_name.split('/')[-1].split('_')[0] + '.png'
             gt_name = dir_name + name
         elif self.task_idx == 2:
-            gt_name = degraded_name.replace("input", "target")
-
+            gt_name = degraded_name.replace(sub_in, sub_gt).replace("input", "target")
         elif self.task_idx == 3:
-            gt_name = degraded_name.replace("input", "target")
+            gt_name = degraded_name.replace(sub_in, sub_gt).replace("input", "target")
 
         return gt_name
 
@@ -378,13 +400,13 @@ class DerainDehazeDataset(Dataset):
         degraded_path = self.ids[idx]
         clean_path = self._get_gt_path(degraded_path)
 
-        degraded_img = crop_img(np.array(Image.open(degraded_path).convert('RGB')), base=16)
+        degraded_img = crop_img(load_image_or_npy(degraded_path), base=16)
         if self.addnoise:
             degraded_img,_ = self._add_gaussian_noise(degraded_img)
-        clean_img = crop_img(np.array(Image.open(clean_path).convert('RGB')), base=16)
+        clean_img = crop_img(load_image_or_npy(clean_path), base=16)
 
         clean_img, degraded_img = self.toTensor(clean_img), self.toTensor(degraded_img)
-        degraded_name = degraded_path.split('/')[-1][:-4]
+        degraded_name = Path(degraded_path).stem
 
         return [degraded_name], degraded_img, clean_img
 
@@ -402,28 +424,28 @@ class TestSpecificDataset(Dataset):
         self.toTensor = ToTensor()
 
     def _init_clean_ids(self, root):
-        extensions = ['jpg', 'JPG', 'png', 'PNG', 'jpeg', 'JPEG', 'bmp', 'BMP']
+        extensions = ['jpg', 'JPG', 'png', 'PNG', 'jpeg', 'JPEG', 'bmp', 'BMP', 'npy', 'NPY']
         if os.path.isdir(root):
             name_list = []
-            for image_file in os.listdir(root):
+            for image_file in filter_system_files(os.listdir(root)):
                 if any([image_file.endswith(ext) for ext in extensions]):
                     name_list.append(image_file)
             if len(name_list) == 0:
-                raise Exception('The input directory does not contain any image files')
-            self.degraded_ids += [root + id_ for id_ in name_list]
+                raise Exception('The input directory does not contain any image/npy files')
+            self.degraded_ids += [os.path.join(root, id_) for id_ in name_list]
         else:
             if any([root.endswith(ext) for ext in extensions]):
                 name_list = [root]
             else:
-                raise Exception('Please pass an Image file')
+                raise Exception('Please pass an Image/NPY file')
             self.degraded_ids = name_list
-        print("Total Images : {}".format(name_list))
+        print("Total Images/Arrays : {}".format(len(name_list)))
 
         self.num_img = len(self.degraded_ids)
 
     def __getitem__(self, idx):
-        degraded_img = crop_img(np.array(Image.open(self.degraded_ids[idx]).convert('RGB')), base=16)
-        name = self.degraded_ids[idx].split('/')[-1][:-4]
+        degraded_img = crop_img(load_image_or_npy(self.degraded_ids[idx]), base=16)
+        name = Path(self.degraded_ids[idx]).stem
 
         degraded_img = self.toTensor(degraded_img)
 
@@ -431,4 +453,5 @@ class TestSpecificDataset(Dataset):
 
     def __len__(self):
         return self.num_img
+
     

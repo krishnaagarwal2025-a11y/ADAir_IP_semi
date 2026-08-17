@@ -282,11 +282,64 @@ class AdaIRValidationCallback(Callback):
         self.tracker.record_epoch(epoch, avg_loss, val_psnr, val_ssim, val_lpips, pl_module.net)
 
 
+class CharbonnierLoss(nn.Module):
+    """Charbonnier Loss (smooth L1 variant), better for image restoration than L1."""
+    def __init__(self, eps=1e-3):
+        super().__init__()
+        self.eps2 = eps ** 2
+
+    def forward(self, pred, target):
+        diff = pred - target
+        return torch.mean(torch.sqrt(diff * diff + self.eps2))
+
+
+class SSIMLoss(nn.Module):
+    """Differentiable SSIM loss: 1.0 - SSIM(pred, target)."""
+    def __init__(self, window_size=11, channels=3):
+        super().__init__()
+        self.window_size = window_size
+        self.channels = channels
+        # Create 1D gaussian kernel
+        sigma = 1.5
+        gauss = torch.Tensor([
+            np.exp(-(x - window_size // 2) ** 2 / (2.0 * sigma ** 2))
+            for x in range(window_size)
+        ])
+        gauss = gauss / gauss.sum()
+        _1d = gauss.unsqueeze(1)
+        _2d = _1d.mm(_1d.t()).float().unsqueeze(0).unsqueeze(0)
+        window = _2d.expand(channels, 1, window_size, window_size).contiguous()
+        self.register_buffer('window', window)
+
+    def forward(self, pred, target):
+        C1 = 0.01 ** 2
+        C2 = 0.03 ** 2
+        pad = self.window_size // 2
+
+        mu1 = nn.functional.conv2d(pred, self.window, padding=pad, groups=self.channels)
+        mu2 = nn.functional.conv2d(target, self.window, padding=pad, groups=self.channels)
+
+        mu1_sq = mu1 ** 2
+        mu2_sq = mu2 ** 2
+        mu1_mu2 = mu1 * mu2
+
+        sigma1_sq = nn.functional.conv2d(pred * pred, self.window, padding=pad, groups=self.channels) - mu1_sq
+        sigma2_sq = nn.functional.conv2d(target * target, self.window, padding=pad, groups=self.channels) - mu2_sq
+        sigma12 = nn.functional.conv2d(pred * target, self.window, padding=pad, groups=self.channels) - mu1_mu2
+
+        ssim_map = ((2 * mu1_mu2 + C1) * (2 * sigma12 + C2)) / \
+                   ((mu1_sq + mu2_sq + C1) * (sigma1_sq + sigma2_sq + C2))
+
+        return 1.0 - ssim_map.mean()
+
+
 class AdaIRModel(pl.LightningModule):
     def __init__(self):
         super().__init__()
         self.net = AdaIR(decoder=True)
-        self.loss_fn = nn.L1Loss()
+        self.charbonnier = CharbonnierLoss(eps=1e-3)
+        self.ssim_loss = SSIMLoss(window_size=11, channels=3)
+        self.ssim_weight = 0.2
 
     def forward(self, x):
         return self.net(x)
@@ -296,8 +349,13 @@ class AdaIRModel(pl.LightningModule):
         restored = self.net(degrad_patch)
         if restored.shape[-2:] != clean_patch.shape[-2:]:
             restored = nn.functional.interpolate(restored, size=clean_patch.shape[-2:], mode='bilinear', align_corners=False)
-        loss = self.loss_fn(restored, clean_patch)
+        # Hybrid loss: Charbonnier + 0.2 * (1 - SSIM)
+        loss_charb = self.charbonnier(restored, clean_patch)
+        loss_ssim = self.ssim_loss(restored, clean_patch)
+        loss = loss_charb + self.ssim_weight * loss_ssim
         self.log("train_loss", loss)
+        self.log("charb_loss", loss_charb, prog_bar=False)
+        self.log("ssim_loss", loss_ssim, prog_bar=False)
         return loss
 
     def configure_optimizers(self):

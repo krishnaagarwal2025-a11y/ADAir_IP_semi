@@ -14,7 +14,7 @@ parser.add_argument('--lr', type=float, default=2e-4, help='learning rate of enc
 parser.add_argument('--de_type', nargs='+', default=['denoise_15', 'denoise_25', 'denoise_50', 'derain', 'dehaze', 'deblur', 'enhance'],
                     help='which type of degradations is training and testing for.')
 
-parser.add_argument('--patch_size', type=int, default=128, help='patchsize of input.')
+parser.add_argument('--patch_size', type=int, default=64, help='patchsize of input (LR). GT patch = patch_size * scale.')
 parser.add_argument('--scale', type=int, default=2, help='Scale factor between input and target resolution (default: 2).')
 parser.add_argument('--num_workers', type=int, default=2, help='number of workers for dataloader (default: 2).')
 parser.add_argument('--val_freq', type=int, default=5, help='Run validation every N epochs (default: 5).')

@@ -1,2 +1,2 @@
 epoch,train_loss,val_psnr,val_ssim,val_lpips,is_best_psnr
-1,0.258073,11.7562,0.4190,0.9144,True
+1,0.315657,15.4985,0.4097,0.6624,True

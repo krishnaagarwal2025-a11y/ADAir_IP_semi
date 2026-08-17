@@ -46,11 +46,11 @@ def load_image_or_npy(path) -> np.ndarray:
     Safely loads an image file or a NumPy array (.npy) file.
     - If path ends with .npy, loads using np.load(path).
     - Otherwise, loads using PIL.Image.open(path).convert('RGB').
-    Returns a (H, W, 3) RGB numpy array in uint8 format.
+    Returns a (H, W, 3) RGB numpy array in float32 [0.0, 1.0] range.
     """
     path_str = str(path)
     if path_str.lower().endswith('.npy'):
-        arr = np.load(path_str)
+        arr = np.load(path_str).astype(np.float32)
         if np.isnan(arr).any() or np.isinf(arr).any():
             arr = np.nan_to_num(arr)
         if arr.ndim == 2:
@@ -62,16 +62,14 @@ def load_image_or_npy(path) -> np.ndarray:
                 arr = np.concatenate([arr] * 3, axis=-1)
             elif arr.shape[2] > 3:
                 arr = arr[:, :, :3]
-        if np.issubdtype(arr.dtype, np.floating):
-            if arr.max() <= 1.0 and arr.min() >= 0.0:
-                arr = (arr * 255.0).astype(np.uint8)
-            else:
-                arr = np.clip(arr, 0, 255).astype(np.uint8)
-        elif arr.dtype != np.uint8:
-            arr = arr.astype(np.uint8)
-        return arr
     else:
-        return np.array(Image.open(path_str).convert('RGB'))
+        arr = np.array(Image.open(path_str).convert('RGB'), dtype=np.float32)
+
+    # Dynamic normalization: enforce strict float32 [0.0, 1.0]
+    if arr.max() > 1.0:
+        arr = arr / 255.0
+    arr = np.clip(arr, 0.0, 1.0)
+    return arr
 
 
 class AdaIRTrainDataset(Dataset):
@@ -226,7 +224,8 @@ class AdaIRTrainDataset(Dataset):
         self.num_rl = len(self.rs_ids)
 
     def _crop_patch(self, img_1, img_2):
-        """Crops input patch of size patch_size and target patch of size patch_size * scale."""
+        """Crops input patch of size patch_size and target patch of size patch_size * scale.
+        Default LR patch = 64x64, GT patch = 128x128 for 2x scale."""
         H, W = img_1.shape[0], img_1.shape[1]
         patch_size_in = self.patch_size
         patch_size_tg = self.patch_size * self.scale
@@ -241,6 +240,25 @@ class AdaIRTrainDataset(Dataset):
         patch_2 = img_2[ind_H_tg:ind_H_tg + patch_size_tg, ind_W_tg:ind_W_tg + patch_size_tg]
 
         return patch_1, patch_2
+
+    @staticmethod
+    def _augment_pair(img_lr, img_hr):
+        """8-fold paired augmentation: identical random hflip, vflip, and rotation
+        applied simultaneously to both LR input and HR target arrays."""
+        # Horizontal flip
+        if random.random() > 0.5:
+            img_lr = np.flip(img_lr, axis=1)
+            img_hr = np.flip(img_hr, axis=1)
+        # Vertical flip
+        if random.random() > 0.5:
+            img_lr = np.flip(img_lr, axis=0)
+            img_hr = np.flip(img_hr, axis=0)
+        # Random rotation from {0, 90, 180, 270}
+        k = random.choice([0, 1, 2, 3])
+        if k > 0:
+            img_lr = np.rot90(img_lr, k=k)
+            img_hr = np.rot90(img_hr, k=k)
+        return np.ascontiguousarray(img_lr), np.ascontiguousarray(img_hr)
 
     def _get_gt_name(self, rainy_name):
         return rainy_name.split("rainy")[0] + 'gt/norain-' + rainy_name.split('rain-')[-1]
@@ -273,16 +291,25 @@ class AdaIRTrainDataset(Dataset):
     def __getitem__(self, idx):
         sample = self.sample_ids[idx]
         if sample.get('is_custom'):
-            degrad_img = load_image_or_npy(sample['degrad_path'])
-            clean_img = load_image_or_npy(sample['clean_path'])
+            degrad_img = load_image_or_npy(sample['degrad_path'])  # float32 [0, 1]
+            clean_img = load_image_or_npy(sample['clean_path'])    # float32 [0, 1]
 
-            degrad_img = crop_img(degrad_img, base=16)
-            clean_img = crop_img(clean_img, base=16)
+            # Paired patch extraction (LR: patch_size, GT: patch_size * scale)
+            degrad_patch, clean_patch = self._crop_patch(degrad_img, clean_img)
 
-            degrad_patch, clean_patch = random_augmentation(*self._crop_patch(degrad_img, clean_img))
+            # Low-variance filter: reject flat target patches (var < 1e-4), retry
+            max_retries = 5
+            retry = 0
+            while clean_patch.var() < 1e-4 and retry < max_retries:
+                degrad_patch, clean_patch = self._crop_patch(degrad_img, clean_img)
+                retry += 1
 
-            clean_patch = self.toTensor(clean_patch)
-            degrad_patch = self.toTensor(degrad_patch)
+            # 8-fold paired augmentation (identical transforms to both)
+            degrad_patch, clean_patch = self._augment_pair(degrad_patch, clean_patch)
+
+            # Convert to tensors (already float32 [0, 1])
+            clean_patch = torch.from_numpy(clean_patch.copy()).permute(2, 0, 1).float()
+            degrad_patch = torch.from_numpy(degrad_patch.copy()).permute(2, 0, 1).float()
 
             return [sample['name'], 0], degrad_patch, clean_patch
         else:

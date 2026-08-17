@@ -12,6 +12,21 @@ from utils.image_utils import random_augmentation, crop_img
 from utils.degradation_utils import Degradation
 
     
+IGNORED_SYSTEM_FILES = {'.ds_store', 'thumbs.db', 'desktop.ini', '.gitignore'}
+
+def filter_system_files(file_list):
+    """Filters out OS metadata files like .DS_Store, Thumbs.db, desktop.ini, and hidden files."""
+    valid = []
+    for f in file_list:
+        basename = os.path.basename(f).lower()
+        if basename.startswith('.') or basename.startswith('._'):
+            continue
+        if basename in IGNORED_SYSTEM_FILES:
+            continue
+        valid.append(f)
+    return valid
+
+
 class AdaIRTrainDataset(Dataset):
     def __init__(self, args):
         super(AdaIRTrainDataset, self).__init__()
@@ -52,10 +67,12 @@ class AdaIRTrainDataset(Dataset):
     def _init_clean_ids(self):
         ref_file = self.args.data_file_dir + "noisy/denoise.txt"
         temp_ids = []
-        temp_ids+= [id_.strip() for id_ in open(ref_file)]
+        if os.path.exists(ref_file):
+            temp_ids += [id_.strip() for id_ in open(ref_file)]
         clean_ids = []
-        name_list = os.listdir(self.args.denoise_dir)
-        clean_ids += [self.args.denoise_dir + id_ for id_ in name_list if id_.strip() in temp_ids]
+        if os.path.exists(self.args.denoise_dir):
+            name_list = filter_system_files(os.listdir(self.args.denoise_dir))
+            clean_ids += [self.args.denoise_dir + id_ for id_ in name_list if not temp_ids or id_.strip() in temp_ids]
 
         if 'denoise_15' in self.de_type:
             self.s15_ids = [{"clean_id": x,"de_type":0} for x in clean_ids]
@@ -79,19 +96,26 @@ class AdaIRTrainDataset(Dataset):
     def _init_hazy_ids(self):
         temp_ids = []
         hazy = self.args.data_file_dir + "hazy/hazy_outside.txt"
-        temp_ids+= [self.args.dehaze_dir + id_.strip() for id_ in open(hazy)]
+        if os.path.exists(hazy):
+            temp_ids += [self.args.dehaze_dir + id_.strip() for id_ in open(hazy)]
         self.hazy_ids = [{"clean_id" : x,"de_type":4} for x in temp_ids]
 
         self.hazy_counter = 0
-        
         self.num_hazy = len(self.hazy_ids)
         print("Total Hazy Ids : {}".format(self.num_hazy))
 
     def _init_deblur_ids(self):
         temp_ids = []
+        sub_input = getattr(self.args, 'input_dir', 'blur')
+        target_dir = os.path.join(self.args.gopro_dir, sub_input)
+        if not os.path.exists(target_dir):
+            target_dir = os.path.join(self.args.gopro_dir, 'blur')
+        if not os.path.exists(target_dir):
+            target_dir = self.args.gopro_dir
 
-        image_list = os.listdir(os.path.join(self.args.gopro_dir, 'blur/'))
-        temp_ids = image_list
+        if os.path.exists(target_dir):
+            image_list = filter_system_files(os.listdir(target_dir))
+            temp_ids = image_list
         self.deblur_ids = [{"clean_id" : x,"de_type":5} for x in temp_ids]
         self.deblur_ids = self.deblur_ids * 5
         self.deblur_counter = 0
@@ -100,8 +124,16 @@ class AdaIRTrainDataset(Dataset):
 
     def _init_enhance_ids(self):
         temp_ids = []
-        image_list = os.listdir(os.path.join(self.args.enhance_dir, 'low/'))
-        temp_ids = image_list
+        sub_input = getattr(self.args, 'input_dir', 'low')
+        target_dir = os.path.join(self.args.enhance_dir, sub_input)
+        if not os.path.exists(target_dir):
+            target_dir = os.path.join(self.args.enhance_dir, 'low')
+        if not os.path.exists(target_dir):
+            target_dir = self.args.enhance_dir
+
+        if os.path.exists(target_dir):
+            image_list = filter_system_files(os.listdir(target_dir))
+            temp_ids = image_list
         self.enhance_ids= [{"clean_id" : x,"de_type":6} for x in temp_ids]
         self.enhance_ids = self.enhance_ids * 20
         self.num_enhance = len(self.enhance_ids)
@@ -110,7 +142,8 @@ class AdaIRTrainDataset(Dataset):
     def _init_rs_ids(self):
         temp_ids = []
         rs = self.args.data_file_dir + "rainy/rainTrain.txt"
-        temp_ids+= [self.args.derain_dir + id_.strip() for id_ in open(rs)]
+        if os.path.exists(rs):
+            temp_ids += [self.args.derain_dir + id_.strip() for id_ in open(rs)]
         self.rs_ids = [{"clean_id":x,"de_type":3} for x in temp_ids]
         self.rs_ids = self.rs_ids * 120
 

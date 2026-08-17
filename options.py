@@ -6,7 +6,7 @@ parser = argparse.ArgumentParser(description="AdaIR Training and Validation Opti
 # Input Parameters
 parser.add_argument('--cuda', type=int, default=0)
 
-parser.add_argument('--epochs', type=int, default=150, help='maximum number of epochs to train the total model.')
+parser.add_argument('--epochs', type=int, default=540, help='maximum number of epochs to train the total model.')
 parser.add_argument('--batch_size', type=int, default=8, help="Batch size to use per GPU")
 parser.add_argument('--val_batch_size', type=int, default=4, help="Batch size for validation")
 parser.add_argument('--lr', type=float, default=2e-4, help='learning rate of encoder.')
@@ -17,10 +17,11 @@ parser.add_argument('--de_type', nargs='+', default=['denoise_15', 'denoise_25',
 parser.add_argument('--patch_size', type=int, default=64, help='patchsize of input (LR). GT patch = patch_size * scale.')
 parser.add_argument('--scale', type=int, default=2, help='Scale factor between input and target resolution (default: 2).')
 parser.add_argument('--num_workers', type=int, default=2, help='number of workers for dataloader (default: 2).')
-parser.add_argument('--val_freq', type=int, default=5, help='Run validation every N epochs (default: 5).')
+parser.add_argument('--val_freq', type=int, default=1, help='Run validation every N epochs (default: 1).')
 parser.add_argument('--val_max_samples', type=int, default=100, help='Max number of validation images to evaluate per cycle (default: 100). Set 0 for all.')
 parser.add_argument('--max_samples', type=int, default=None, help='Limit training/validation dataset to first N pairs. None = use all pairs.')
 parser.add_argument('--resume_from', type=str, default=None, help='Path to a .pth or .ckpt checkpoint file to resume model weights from.')
+parser.add_argument('--limit_train_batches', type=int, default=100, help='Limit number of training batches (iterations) per epoch (default: 100).')
 
 # Paths & Folder Mappings
 parser.add_argument('--data_dir', type=str, default='data/train', help='root directory for training data')

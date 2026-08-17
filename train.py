@@ -450,6 +450,7 @@ def main():
         'logger': logger,
         'callbacks': [val_callback],
         'precision': '16-mixed' if device_str == 'gpu' else '32',  # FP16 Tensor Cores on GPU only
+        'limit_train_batches': opt.limit_train_batches,
     }
     if device_str == 'gpu' and num_devices > 1:
         trainer_kwargs['strategy'] = 'ddp_find_unused_parameters_true'

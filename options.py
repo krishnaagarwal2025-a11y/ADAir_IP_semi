@@ -19,6 +19,8 @@ parser.add_argument('--scale', type=int, default=2, help='Scale factor between i
 parser.add_argument('--num_workers', type=int, default=2, help='number of workers for dataloader (default: 2).')
 parser.add_argument('--val_freq', type=int, default=5, help='Run validation every N epochs (default: 5).')
 parser.add_argument('--val_max_samples', type=int, default=100, help='Max number of validation images to evaluate per cycle (default: 100). Set 0 for all.')
+parser.add_argument('--max_samples', type=int, default=None, help='Limit training/validation dataset to first N pairs. None = use all pairs.')
+parser.add_argument('--resume_from', type=str, default=None, help='Path to a .pth or .ckpt checkpoint file to resume model weights from.')
 
 # Paths & Folder Mappings
 parser.add_argument('--data_dir', type=str, default='data/train', help='root directory for training data')

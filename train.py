@@ -314,6 +314,10 @@ def main():
     print(f"  Epochs: {opt.epochs} | Batch Size: {opt.batch_size} | LR: {opt.lr}")
     print(f"  Checkpoints Dir: {opt.ckpt_dir}")
     print(f"  Metrics CSV:     {opt.metrics_file}")
+    if opt.max_samples:
+        print(f"  Max Samples:     {opt.max_samples} pairs (subsampled dataset)")
+    if opt.resume_from:
+        print(f"  Resume From:     {opt.resume_from}")
     print("=" * 70)
 
     device_str = "gpu" if torch.cuda.is_available() and opt.num_gpus > 0 else "cpu"
@@ -330,6 +334,10 @@ def main():
     )
 
     val_dataset = GenericPairedValDataset(opt.val_dir, input_dir_name=opt.input_dir, target_dir_name=opt.target_dir)
+    # Apply --max_samples to val dataset as well (cap to same N for consistency)
+    if opt.max_samples and opt.max_samples > 0 and len(val_dataset) > opt.max_samples:
+        val_dataset.pairs = val_dataset.pairs[:opt.max_samples]
+        print(f"[Val] Subsampled validation set to {opt.max_samples} pairs (--max_samples={opt.max_samples})")
     if len(val_dataset) == 0:
         print(f"[Notice] No validation images found in '{opt.val_dir}'. Using subset of training data for validation metrics.")
         val_loader = trainloader
@@ -357,6 +365,25 @@ def main():
         logger = TensorBoardLogger(save_dir="logs/")
 
     model = AdaIRModel()
+
+    # --- Checkpoint Resume ---
+    if opt.resume_from:
+        resume_path = Path(opt.resume_from)
+        if not resume_path.exists():
+            print(f"[WARNING] --resume_from path not found: {resume_path}. Starting from scratch.")
+        else:
+            ckpt = torch.load(str(resume_path), map_location='cpu')
+            # Support both raw state_dicts and our {epoch, state_dict, ...} format
+            state_dict = ckpt.get('state_dict', ckpt)
+            # Strip Lightning 'net.' prefix if present
+            if all(k.startswith('net.') for k in state_dict):
+                state_dict = {k[len('net.'):]: v for k, v in state_dict.items()}
+            missing, unexpected = model.net.load_state_dict(state_dict, strict=False)
+            print(f"[RESUME] Loaded weights from '{resume_path.name}'")
+            if missing:
+                print(f"  Missing keys  ({len(missing)}): {missing[:5]}{'...' if len(missing) > 5 else ''}")
+            if unexpected:
+                print(f"  Unexpected keys ({len(unexpected)}): {unexpected[:5]}{'...' if len(unexpected) > 5 else ''}")
 
     trainer_kwargs = {
         'max_epochs': opt.epochs,

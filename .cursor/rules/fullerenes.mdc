@@ -1,0 +1,37 @@
+---
+description: Codebase layout and top architectural dependencies
+globs: *
+alwaysApply: true
+---
+
+# Fullerenes Architecture Context
+
+## Core Files You Should Know
+- `net/model.py` (51 nodes)
+- `utils/dataset_utils.py` (42 nodes)
+- `utils/image_utils.py` (20 nodes)
+- `options.py` (2 nodes)
+- `utils/degradation_utils.py` (7 nodes)
+
+## Top Functions & Classes
+- `pil_to_np` in `utils/image_io.py`
+- `crop_image` in `utils/image_io.py`
+- `filter_system_files` in `utils/dataset_utils.py`
+- `get_image` in `utils/image_io.py`
+- `create_window` in `utils/pytorch_ssim/__init__.py`
+- `log_error` in `validate_dataset.py`
+- `_degrade_by_type` in `utils/degradation_utils.py`
+- `_init_clean_ids` in `utils/dataset_utils.py`
+- `_ssim` in `utils/pytorch_ssim/__init__.py`
+- `log_info` in `validate_dataset.py`
+
+## Main Entry Points
+- `train.py`
+- `test.py`
+- `validate_dataset.py`
+- `utils/pytorch_ssim/__init__.py`
+- `utils/imresize.py`
+
+## Instructions
+- When modifying these core dependencies, heavily trace caller graphs before refactoring.
+- Run `npx fullerenes query "<question>"` to get exact context footprints.

@@ -104,6 +104,12 @@ class AdaIRTrainDataset(Dataset):
             self._init_ids()
             self._merge_ids()
 
+        # Apply --max_samples subsampling if specified
+        max_n = getattr(args, 'max_samples', None)
+        if max_n is not None and max_n > 0 and len(self.sample_ids) > max_n:
+            self.sample_ids = self.sample_ids[:max_n]
+            print(f"[AdaIRTrainDataset] Subsampled to {max_n} pairs (--max_samples={max_n})")
+
         self.crop_transform = Compose([
             ToPILImage(),
             RandomCrop(self.patch_size),

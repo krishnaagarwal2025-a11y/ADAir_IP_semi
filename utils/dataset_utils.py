@@ -186,13 +186,21 @@ class AdaIRTrainDataset(Dataset):
         print("Total Rainy Ids : {}".format(self.num_rl))
 
     def _crop_patch(self, img_1, img_2):
+        scale = getattr(self.args, 'scale', 1)
         H = img_1.shape[0]
         W = img_1.shape[1]
-        ind_H = random.randint(0, H - self.args.patch_size)
-        ind_W = random.randint(0, W - self.args.patch_size)
 
-        patch_1 = img_1[ind_H:ind_H + self.args.patch_size, ind_W:ind_W + self.args.patch_size]
-        patch_2 = img_2[ind_H:ind_H + self.args.patch_size, ind_W:ind_W + self.args.patch_size]
+        patch_size_in = self.args.patch_size
+        patch_size_tg = self.args.patch_size * scale
+
+        ind_H = random.randint(0, H - patch_size_in)
+        ind_W = random.randint(0, W - patch_size_in)
+
+        patch_1 = img_1[ind_H:ind_H + patch_size_in, ind_W:ind_W + patch_size_in]
+
+        ind_H_tg = ind_H * scale
+        ind_W_tg = ind_W * scale
+        patch_2 = img_2[ind_H_tg:ind_H_tg + patch_size_tg, ind_W_tg:ind_W_tg + patch_size_tg]
 
         return patch_1, patch_2
 

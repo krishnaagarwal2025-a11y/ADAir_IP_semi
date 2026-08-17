@@ -15,6 +15,7 @@ parser.add_argument('--de_type', nargs='+', default=['denoise_15', 'denoise_25',
                     help='which type of degradations is training and testing for.')
 
 parser.add_argument('--patch_size', type=int, default=128, help='patchsize of input.')
+parser.add_argument('--scale', type=int, default=2, help='Scale factor between input and target resolution (default: 2).')
 parser.add_argument('--num_workers', type=int, default=4, help='number of workers.')
 
 # Paths & Folder Mappings

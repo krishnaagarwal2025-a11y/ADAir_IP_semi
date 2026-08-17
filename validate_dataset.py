@@ -3,8 +3,8 @@
 AdaIR Dataset Validation Script
 ================================
 Validates image and NumPy array (.npy) datasets to ensure they match AdaIR's
-expected directory format and data specifications (input/target pairs, resolution,
-channels, data types, and file integrity).
+expected directory format, resolution scaling (e.g. 128x128 NoisyLR vs 256x256 GT),
+channels, data types, and file integrity.
 
 Supported File Types:
 - Standard Images: .png, .jpg, .jpeg, .bmp, .tif, .tiff, .webp
@@ -43,6 +43,7 @@ class DatasetValidator:
         data_dir: str,
         input_dir_name: str = 'NoisyLR',
         target_dir_name: str = 'GT',
+        scale: int = 2,
         min_patch_size: int = 128,
         task: str = 'auto',
         verbose: bool = False
@@ -50,6 +51,7 @@ class DatasetValidator:
         self.data_dir = Path(data_dir).resolve()
         self.input_dir_name = input_dir_name
         self.target_dir_name = target_dir_name
+        self.scale = scale
         self.min_patch_size = min_patch_size
         self.task = task.lower()
         self.verbose = verbose
@@ -97,23 +99,19 @@ class DatasetValidator:
         """Matches target file by exact filename, stem match (e.g. img.npy <-> img.png), or task rule."""
         input_name = input_path.name
 
-        # Exact filename match
         if input_name in target_files:
             return target_files[input_name]
 
-        # Stem match (e.g. 0001.npy <-> 0001.png or 0001.npy <-> 0001.npy)
         stem = input_path.stem
         for t_name, t_path in target_files.items():
             if t_path.stem == stem:
                 return t_path
 
-        # Task-specific pattern match: rain-X -> norain-X
         if task_type == 'derain' and 'rain-' in input_name:
             norain_name = input_name.replace('rain-', 'norain-')
             if norain_name in target_files:
                 return target_files[norain_name]
 
-        # Task-specific pattern match: dehaze SOTS 0025_0.8_0.1.jpg -> 0025.png
         if task_type == 'dehaze' and '_' in input_name:
             prefix = input_name.split('_')[0]
             for t_name, t_path in target_files.items():
@@ -123,17 +121,13 @@ class DatasetValidator:
         return None
 
     def validate_image_or_npy_file(self, img_path: Path) -> Optional[Tuple[Tuple[int, int], str, int]]:
-        """
-        Validates an image or .npy file's integrity.
-        Returns ((Width, Height), data_type_str, channels).
-        """
+        """Validates an image or .npy file's integrity. Returns ((Width, Height), data_type_str, channels)."""
         suffix = img_path.suffix.lower()
 
         if suffix == '.npy':
             try:
                 arr = np.load(img_path)
                 
-                # Check NaN / Inf
                 if np.isnan(arr).any() or np.isinf(arr).any():
                     self.stats['nan_inf_errors'] += 1
                     self.log_error(f"NumPy file contains NaN or Inf values: {img_path}")
@@ -145,7 +139,6 @@ class DatasetValidator:
                     h, w = arr.shape
                     channels = 1
                 elif arr.ndim == 3:
-                    # Check (C, H, W) vs (H, W, C)
                     if arr.shape[0] in (1, 3, 4) and arr.shape[2] > 4:
                         channels, h, w = arr.shape
                     else:
@@ -177,10 +170,11 @@ class DatasetValidator:
                 return None
 
     def validate_pair_directory(self, input_dir: Path, target_dir: Path, task_type: str = 'generic') -> bool:
-        """Validates input and target directory pairs."""
+        """Validates input and target directory pairs, enforcing scale factor between dimensions."""
         self.log_info(f"Validating task [{task_type.upper()}] directory:")
         self.log_info(f"  Input dir:  {input_dir}")
         self.log_info(f"  Target dir: {target_dir}")
+        self.log_info(f"  Expected Resolution Scale: {self.scale}x (Target = Input * {self.scale})")
 
         input_files = {
             f.name: f for f in input_dir.rglob('*') if is_valid_image_file(f)
@@ -230,18 +224,21 @@ class DatasetValidator:
             (in_w, in_h), in_mode, in_c = input_info
             (tg_w, tg_h), tg_mode, tg_c = target_info
 
-            if (in_w, in_h) != (tg_w, tg_h):
+            expected_tg_w = in_w * self.scale
+            expected_tg_h = in_h * self.scale
+
+            if (tg_w, tg_h) != (expected_tg_w, expected_tg_h):
                 self.stats['mismatched_dimensions'] += 1
                 self.log_error(
-                    f"Dimension mismatch for pair '{input_name}': "
-                    f"Input ({in_w}x{in_h}) vs Target ({tg_w}x{tg_h})"
+                    f"Scale dimension mismatch for pair '{input_name}': "
+                    f"Input ({in_w}x{in_h}) vs Target ({tg_w}x{tg_h}). Expected Target ({expected_tg_w}x{expected_tg_h}) for scale {self.scale}x."
                 )
                 continue
 
             if in_w < self.min_patch_size or in_h < self.min_patch_size:
                 self.stats['undersized_images'] += 1
                 self.log_error(
-                    f"Pair '{input_name}' resolution ({in_w}x{in_h}) is smaller than "
+                    f"Input '{input_name}' resolution ({in_w}x{in_h}) is smaller than "
                     f"minimum patch size requirement ({self.min_patch_size}x{self.min_patch_size})"
                 )
                 continue
@@ -267,6 +264,7 @@ class DatasetValidator:
         print(f"[START] Starting AdaIR Dataset Validation on: {self.data_dir}")
         print(f"        Input Subfolder:  {self.input_dir_name}")
         print(f"        Target Subfolder: {self.target_dir_name}")
+        print(f"        Scale Factor:     {self.scale}x (Target = Input * {self.scale})")
         print(f"        Min Patch Size:   {self.min_patch_size}x{self.min_patch_size}")
         print("=" * 70)
 
@@ -329,7 +327,7 @@ class DatasetValidator:
         print(f"[FAIL] Missing Target Pairs:  {self.stats['missing_targets']}")
         print(f"[FAIL] Corrupted Files:       {self.stats['corrupted_images']}")
         print(f"[FAIL] NaN/Inf Array Errors:  {self.stats['nan_inf_errors']}")
-        print(f"[FAIL] Mismatched Dimensions: {self.stats['mismatched_dimensions']}")
+        print(f"[FAIL] Mismatched Scale Dims: {self.stats['mismatched_dimensions']}")
         print(f"[FAIL] Undersized (<{self.min_patch_size}px): {self.stats['undersized_images']}")
         print(f"[WARN] Orphan Target Files:   {self.stats['orphan_targets']}")
         print(f"[WARN] Channel Warnings:      {self.stats['channel_warnings']}")
@@ -343,7 +341,7 @@ class DatasetValidator:
             if len(self.errors) > 10:
                 print(f"  ... and {len(self.errors) - 10} more error(s).")
         else:
-            print("[RESULT] Validation PASSED! Dataset (.png/.jpg/.npy) matches AdaIR format.")
+            print(f"[RESULT] Validation PASSED! Dataset (.png/.jpg/.npy) matches AdaIR format with {self.scale}x scale factor.")
         print("=" * 70)
 
     def save_report(self, output_path: str):
@@ -351,6 +349,7 @@ class DatasetValidator:
             'data_dir': str(self.data_dir),
             'input_dir_name': self.input_dir_name,
             'target_dir_name': self.target_dir_name,
+            'scale': self.scale,
             'min_patch_size': self.min_patch_size,
             'is_valid': len(self.errors) == 0,
             'stats': self.stats,
@@ -362,36 +361,43 @@ class DatasetValidator:
         print(f"[INFO] Validation report saved to: {output_path}")
 
 
-def create_sample_dataset(target_dir: Path):
-    """Utility to generate sample NoisyLR / GT image & .npy dataset for testing."""
-    print(f"[SETUP] Creating sample NoisyLR & GT dataset (with .npy files) at: {target_dir}")
+def create_sample_dataset(target_dir: Path, scale: int = 2):
+    """Utility to generate sample NoisyLR (128x128) & GT (256x256) dataset for testing scale factor."""
+    import shutil
+    print(f"[SETUP] Creating sample NoisyLR (128x128) & GT ({128*scale}x{128*scale}, scale={scale}x) dataset at: {target_dir}")
     train_dir = target_dir / "train"
+    if train_dir.exists():
+        shutil.rmtree(train_dir)
+        
     input_dir = train_dir / "NoisyLR"
     target_dir_path = train_dir / "GT"
 
     input_dir.mkdir(parents=True, exist_ok=True)
     target_dir_path.mkdir(parents=True, exist_ok=True)
 
-    # 1. Standard PNG pairs
+    in_w, in_h = 128, 128
+    tg_w, tg_h = in_w * scale, in_h * scale
+
     for i in range(1, 4):
         img_name = f"sample_{i:03d}.png"
-        img = Image.new('RGB', (256, 256), color=(i * 40, 100, 150))
-        img.save(input_dir / img_name)
-        img.save(target_dir_path / img_name)
+        in_img = Image.new('RGB', (in_w, in_h), color=(i * 40, 100, 150))
+        tg_img = Image.new('RGB', (tg_w, tg_h), color=(i * 40, 100, 150))
+        in_img.save(input_dir / img_name)
+        tg_img.save(target_dir_path / img_name)
 
-    # 2. NumPy .npy pairs
     for i in range(4, 6):
         npy_name = f"sample_{i:03d}.npy"
-        arr = (np.random.rand(256, 256, 3) * 255).astype(np.uint8)
-        np.save(input_dir / npy_name, arr)
-        np.save(target_dir_path / npy_name, arr)
+        in_arr = (np.random.rand(in_h, in_w, 3) * 255).astype(np.uint8)
+        tg_arr = (np.random.rand(tg_h, tg_w, 3) * 255).astype(np.uint8)
+        np.save(input_dir / npy_name, in_arr)
+        np.save(target_dir_path / npy_name, tg_arr)
 
-    print(f"[SETUP] Created sample image & .npy pairs in NoisyLR/ and GT/ under {train_dir}")
+    print(f"[SETUP] Created scaled sample pairs in NoisyLR/ ({in_w}x{in_h}) and GT/ ({tg_w}x{tg_h}) under {train_dir}")
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Validate NoisyLR / GT image and .npy dataset structure for AdaIR."
+        description="Validate NoisyLR / GT image and .npy dataset structure with scale factor for AdaIR."
     )
     parser.add_argument(
         '--data_dir', '-d', type=str, default='data/train',
@@ -406,8 +412,12 @@ def main():
         help="Name or subfolder for ground-truth clean images / .npy files (default: GT)."
     )
     parser.add_argument(
+        '--scale', '-s', type=int, default=2,
+        help="Scale factor between input and target resolution (default: 2)."
+    )
+    parser.add_argument(
         '--min_patch_size', '-p', type=int, default=128,
-        help="Minimum required image/array width and height (default: 128)."
+        help="Minimum required input width and height (default: 128)."
     )
     parser.add_argument(
         '--task', '-t', type=str, default='auto',
@@ -424,13 +434,13 @@ def main():
     )
     parser.add_argument(
         '--create_sample', action='store_true',
-        help="Create a sample dataset with .png and .npy files."
+        help="Create a sample scaled dataset with NoisyLR and GT files."
     )
 
     args = parser.parse_args()
 
     if args.create_sample:
-        create_sample_dataset(Path('data'))
+        create_sample_dataset(Path('data'), scale=args.scale)
         if args.data_dir == 'data/train' and not Path(args.data_dir).exists():
             args.data_dir = 'data/train'
 
@@ -438,6 +448,7 @@ def main():
         data_dir=args.data_dir,
         input_dir_name=args.input_dir,
         target_dir_name=args.target_dir,
+        scale=args.scale,
         min_patch_size=args.min_patch_size,
         task=args.task,
         verbose=args.verbose

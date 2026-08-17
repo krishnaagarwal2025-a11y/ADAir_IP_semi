@@ -272,6 +272,7 @@ def main():
     print("=" * 70)
     print("🚀 Starting AdaIR Training & Validation Loop")
     print(f"  Input Folder: {opt.input_dir} | Target Folder: {opt.target_dir}")
+    print(f"  Scale Factor: {opt.scale}x (Target = Input * {opt.scale})")
     print(f"  Epochs: {opt.epochs} | Batch Size: {opt.batch_size} | LR: {opt.lr}")
     print(f"  Checkpoints Dir: {opt.ckpt_dir}")
     print(f"  Metrics CSV:     {opt.metrics_file}")

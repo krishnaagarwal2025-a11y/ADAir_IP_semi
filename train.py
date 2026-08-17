@@ -159,11 +159,15 @@ class ValidationMetricsTracker:
                 print(f"[Warning] Failed to initialize LPIPS: {e}")
 
     @torch.no_grad()
-    def evaluate(self, model: nn.Module, val_loader: DataLoader) -> tuple:
+    def evaluate(self, model: nn.Module, val_loader: DataLoader, max_samples: int = 0) -> tuple:
+        """Evaluate PSNR/SSIM/LPIPS on up to max_samples images (0 = all)."""
         model.eval()
         psnr_list, ssim_list, lpips_list = [], [], []
+        n_evaluated = 0
 
         for batch in tqdm(val_loader, desc="Validating", leave=False):
+            if max_samples > 0 and n_evaluated >= max_samples:
+                break
             if len(batch) == 3:
                 _, degrad_patch, clean_patch = batch
             else:
@@ -181,6 +185,8 @@ class ValidationMetricsTracker:
             cln_np = clean_patch.cpu().numpy().transpose(0, 2, 3, 1)
 
             for i in range(rec_np.shape[0]):
+                if max_samples > 0 and n_evaluated >= max_samples:
+                    break
                 p_val = peak_signal_noise_ratio(cln_np[i], rec_np[i], data_range=1.0)
                 try:
                     s_val = structural_similarity(cln_np[i], rec_np[i], data_range=1.0, channel_axis=-1)
@@ -189,10 +195,14 @@ class ValidationMetricsTracker:
 
                 psnr_list.append(p_val)
                 ssim_list.append(s_val)
+                n_evaluated += 1
 
             if self.lpips_fn is not None:
-                rec_norm = restored * 2.0 - 1.0
-                cln_norm = clean_patch * 2.0 - 1.0
+                # Only compute LPIPS for images we actually evaluated in this batch
+                n_batch = rec_np.shape[0]
+                used = min(n_batch, max(0, max_samples - (n_evaluated - n_batch))) if max_samples > 0 else n_batch
+                rec_norm = restored[:used] * 2.0 - 1.0
+                cln_norm = clean_patch[:used] * 2.0 - 1.0
                 lp_val = self.lpips_fn(rec_norm, cln_norm).mean().item()
                 lpips_list.append(lp_val)
 
@@ -241,10 +251,13 @@ class ValidationMetricsTracker:
 
 class AdaIRValidationCallback(Callback):
     """PyTorch Lightning Callback for per-epoch metric evaluation and checkpoint saving."""
-    def __init__(self, val_loader: DataLoader, tracker: ValidationMetricsTracker):
+    def __init__(self, val_loader: DataLoader, tracker: ValidationMetricsTracker,
+                 val_freq: int = 5, val_max_samples: int = 100):
         super().__init__()
         self.val_loader = val_loader
         self.tracker = tracker
+        self.val_freq = max(1, val_freq)
+        self.val_max_samples = val_max_samples
         self.epoch_losses = []
 
     def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
@@ -256,9 +269,15 @@ class AdaIRValidationCallback(Callback):
         avg_loss = float(np.mean(self.epoch_losses)) if self.epoch_losses else 0.0
         self.epoch_losses.clear()
 
+        # Only run validation every val_freq epochs (always run on final epoch)
+        if epoch % self.val_freq != 0 and epoch != trainer.max_epochs:
+            return
+
         device = pl_module.device
         self.tracker.device = device
-        val_psnr, val_ssim, val_lpips = self.tracker.evaluate(pl_module.net, self.val_loader)
+        val_psnr, val_ssim, val_lpips = self.tracker.evaluate(
+            pl_module.net, self.val_loader, max_samples=self.val_max_samples
+        )
 
         self.tracker.record_epoch(epoch, avg_loss, val_psnr, val_ssim, val_lpips, pl_module.net)
 
@@ -300,10 +319,14 @@ def main():
     device_str = "gpu" if torch.cuda.is_available() and opt.num_gpus > 0 else "cpu"
     num_devices = opt.num_gpus if device_str == "gpu" else 1
 
+    # Use persistent_workers only when num_workers > 0 (required by PyTorch)
+    use_persistent = opt.num_workers > 0
+
     trainset = AdaIRTrainDataset(opt)
     trainloader = DataLoader(
-        trainset, batch_size=opt.batch_size, pin_memory=True, shuffle=True,
-        drop_last=True, num_workers=opt.num_workers
+        trainset, batch_size=opt.batch_size,
+        pin_memory=True, shuffle=True, drop_last=True,
+        num_workers=opt.num_workers, persistent_workers=use_persistent
     )
 
     val_dataset = GenericPairedValDataset(opt.val_dir, input_dir_name=opt.input_dir, target_dir_name=opt.target_dir)
@@ -311,7 +334,10 @@ def main():
         print(f"[Notice] No validation images found in '{opt.val_dir}'. Using subset of training data for validation metrics.")
         val_loader = trainloader
     else:
-        val_loader = DataLoader(val_dataset, batch_size=opt.val_batch_size, shuffle=False, num_workers=opt.num_workers)
+        val_loader = DataLoader(
+            val_dataset, batch_size=opt.val_batch_size, shuffle=True,
+            num_workers=opt.num_workers, pin_memory=True, persistent_workers=use_persistent
+        )
 
     tracker = ValidationMetricsTracker(
         device=torch.device('cuda:0' if device_str == 'gpu' else 'cpu'),
@@ -319,7 +345,11 @@ def main():
         metrics_file=opt.metrics_file,
         max_epochs=opt.epochs
     )
-    val_callback = AdaIRValidationCallback(val_loader, tracker)
+    val_callback = AdaIRValidationCallback(
+        val_loader, tracker,
+        val_freq=opt.val_freq,
+        val_max_samples=opt.val_max_samples
+    )
 
     if opt.wblogger is not None:
         logger = WandbLogger(project=opt.wblogger, name="AdaIR-Train")
@@ -333,7 +363,8 @@ def main():
         'accelerator': device_str,
         'devices': num_devices,
         'logger': logger,
-        'callbacks': [val_callback]
+        'callbacks': [val_callback],
+        'precision': '16-mixed' if device_str == 'gpu' else '32',  # FP16 Tensor Cores on GPU only
     }
     if device_str == 'gpu' and num_devices > 1:
         trainer_kwargs['strategy'] = 'ddp_find_unused_parameters_true'

@@ -260,6 +260,46 @@ class AdaIRTrainDataset(Dataset):
             img_hr = np.rot90(img_hr, k=k)
         return np.ascontiguousarray(img_lr), np.ascontiguousarray(img_hr)
 
+    @staticmethod
+    def _apply_cutblur(img_lr, img_hr, scale=2, prob=0.2):
+        """
+        Apply CutBlur augmentation with specified probability.
+        Randomly swaps a sub-region between LR (img_lr) and GT (img_hr).
+        """
+        if random.random() > prob:
+            return img_lr, img_hr
+
+        h_lr, w_lr, _ = img_lr.shape
+        # Choose random box size
+        cut_h = random.randint(h_lr // 4, h_lr // 2)
+        cut_w = random.randint(w_lr // 4, w_lr // 2)
+
+        # Choose random location
+        cy = random.randint(0, h_lr - cut_h)
+        cx = random.randint(0, w_lr - cut_w)
+
+        # Scale coordinates for GT patch
+        cy_hr, cx_hr = cy * scale, cx * scale
+        cut_h_hr, cut_w_hr = cut_h * scale, cut_w * scale
+
+        if random.random() > 0.5:
+            # Replace LR sub-region with downsampled HR sub-region
+            hr_sub = img_hr[cy_hr:cy_hr+cut_h_hr, cx_hr:cx_hr+cut_w_hr]
+            # Downsample using numpy slicing
+            lr_down = hr_sub[::scale, ::scale, :]
+            # Ensure shape matches exactly
+            lr_down = lr_down[:cut_h, :cut_w, :]
+            img_lr[cy:cy+cut_h, cx:cx+cut_w] = lr_down
+        else:
+            # Replace HR sub-region with upsampled LR sub-region
+            lr_sub = img_lr[cy:cy+cut_h, cx:cx+cut_w]
+            # Upsample using np.repeat
+            hr_up = np.repeat(np.repeat(lr_sub, scale, axis=0), scale, axis=1)
+            hr_up = hr_up[:cut_h_hr, :cut_w_hr, :]
+            img_hr[cy_hr:cy_hr+cut_h_hr, cx_hr:cx_hr+cut_w_hr] = hr_up
+
+        return img_lr, img_hr
+
     def _get_gt_name(self, rainy_name):
         return rainy_name.split("rainy")[0] + 'gt/norain-' + rainy_name.split('rain-')[-1]
 
@@ -296,16 +336,23 @@ class AdaIRTrainDataset(Dataset):
 
             # Paired patch extraction (LR: patch_size, GT: patch_size * scale)
             degrad_patch, clean_patch = self._crop_patch(degrad_img, clean_img)
+            degrad_patch = degrad_patch.copy()
+            clean_patch = clean_patch.copy()
 
             # Low-variance filter: reject flat target patches (var < 1e-4), retry
             max_retries = 5
             retry = 0
             while clean_patch.var() < 1e-4 and retry < max_retries:
                 degrad_patch, clean_patch = self._crop_patch(degrad_img, clean_img)
+                degrad_patch = degrad_patch.copy()
+                clean_patch = clean_patch.copy()
                 retry += 1
 
             # 8-fold paired augmentation (identical transforms to both)
             degrad_patch, clean_patch = self._augment_pair(degrad_patch, clean_patch)
+
+            # Apply CutBlur augmentation (20% probability)
+            degrad_patch, clean_patch = self._apply_cutblur(degrad_patch, clean_patch, scale=self.scale, prob=0.2)
 
             # Convert to tensors (already float32 [0, 1])
             clean_patch = torch.from_numpy(clean_patch.copy()).permute(2, 0, 1).float()

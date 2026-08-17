@@ -6,7 +6,7 @@ parser = argparse.ArgumentParser(description="AdaIR Training and Validation Opti
 # Input Parameters
 parser.add_argument('--cuda', type=int, default=0)
 
-parser.add_argument('--epochs', type=int, default=540, help='maximum number of epochs to train the total model.')
+parser.add_argument('--epochs', type=int, default=40, help='maximum number of epochs to train the total model.')
 parser.add_argument('--batch_size', type=int, default=8, help="Batch size to use per GPU")
 parser.add_argument('--val_batch_size', type=int, default=4, help="Batch size for validation")
 parser.add_argument('--lr', type=float, default=2e-4, help='learning rate of encoder.')

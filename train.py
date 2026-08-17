@@ -230,13 +230,13 @@ class ValidationMetricsTracker:
             torch.save({'epoch': epoch, 'state_dict': model.state_dict(), 'lpips': val_lpips, 'psnr': val_psnr}, best_lpips_path)
             print(f"\n>>> [NEW BEST] New Best LPIPS: {val_lpips:.4f} achieved! Saved best_lpips_model.pth")
 
-        best_psnr_str = f"{self.best_psnr:.2f} dB (Epoch {self.best_psnr_epoch})" if self.best_psnr != -float('inf') else "N/A"
+        best_psnr_val = f"{self.best_psnr:.2f}" if self.best_psnr != -float('inf') else "N/A"
         print(
             f"Epoch [{epoch}/{self.max_epochs}] | "
             f"Val PSNR: {val_psnr:.2f} dB | "
             f"Val SSIM: {val_ssim:.4f} | "
             f"Val LPIPS: {val_lpips:.4f} | "
-            f"Best PSNR So Far: {best_psnr_str}"
+            f"Best PSNR: {best_psnr_val} dB"
         )
 
         file_exists = self.metrics_file.exists()

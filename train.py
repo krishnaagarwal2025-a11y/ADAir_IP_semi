@@ -71,6 +71,7 @@ def train():
         patch_size=config['dataset']['patch_size'],
         phase='train'
     )
+    print(f"Found {len(train_dataset)} training pairs.")
     
     train_loader = DataLoader(
         train_dataset, 

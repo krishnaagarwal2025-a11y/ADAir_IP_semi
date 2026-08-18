@@ -36,6 +36,11 @@ def validate():
     ).to(device)
     
     # Load state dict
+    if not os.path.exists(args.checkpoint):
+        raise FileNotFoundError(
+            f"Checkpoint not found: {args.checkpoint}. "
+            "Train first, or upload/copy your .pth file to this path."
+        )
     model.load_state_dict(torch.load(args.checkpoint, map_location=device))
     model.eval()
 

@@ -15,8 +15,21 @@ class SemiconDataset(Dataset):
         torch.manual_seed(seed)
         np.random.seed(seed)
         
-        # Verify dataset length
-        assert len(self.noisy_paths) == len(self.gt_paths), "Mismatch between NoisyLR and GT counts"
+        if len(self.noisy_paths) == 0:
+            raise ValueError(
+                f"No .npy files found in noisy_dir={noisy_dir!r}. "
+                "Update configs/train.yaml or move your dataset to the expected folder."
+            )
+        if len(self.gt_paths) == 0:
+            raise ValueError(
+                f"No .npy files found in gt_dir={gt_dir!r}. "
+                "Update configs/train.yaml or move your dataset to the expected folder."
+            )
+        if len(self.noisy_paths) != len(self.gt_paths):
+            raise ValueError(
+                f"Mismatch between NoisyLR and GT counts: "
+                f"{len(self.noisy_paths)} noisy files vs {len(self.gt_paths)} GT files."
+            )
 
     def __len__(self):
         return len(self.noisy_paths)

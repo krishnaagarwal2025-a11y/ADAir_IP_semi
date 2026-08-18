@@ -1,0 +1,30 @@
+experiment_name: "adair_semicon_baseline"
+
+model:
+  name: "AdaIR_SR"
+  pretrained_path: "checkpoints/pretrained_adair.pth" # Ensure you download this beforehand
+  in_channels: 1
+  out_channels: 1
+  upscale: 2
+  
+dataset:
+  train_noisy_dir: "train/train/NoisyLR"
+  train_gt_dir: "train/train/GT"
+  val_noisy_dir: "test/NoisyLR"
+  val_gt_dir: "test/GT"
+  batch_size: 16
+  patch_size: 128
+  num_workers: 4
+  
+training:
+  epochs: 200
+  learning_rate: 2.0e-4
+  optimizer: "AdamW"
+  scheduler: "CosineAnnealingLR"
+  T_max: 200
+  loss: "CharbonnierLoss"
+  weight_decay: 1.0e-4
+  use_amp: true
+  validate_every: 1
+  save_dir: "checkpoints/"
+  log_dir: "reports/"
